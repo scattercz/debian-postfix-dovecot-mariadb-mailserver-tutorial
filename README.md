@@ -34,7 +34,15 @@ Our solution will be built upon following packages:
 
 This tutorial assumes that you are familiar with linux shell, SQL, editing config files and you can search linux system logs to locate possible problems. I also assumes that you have freshly installed linux server at your disposal and are using account which can sudo command or root account (which is highly insecure, by the way... :-).
 
-It also assumes that you have a pre-configured domain with proper MX records pointing to your server's IP address.
+It also assumes that you have a pre-configured domain with proper MX records pointing to your server's IP address. In this tutorial, i will use following settings:
+
+    Domain: mydomain.com
+    Server's FQDN: mail.mydomain.com
+    MariaDB user: mailuser
+    MariaDB password: mailpassword
+    Database name: mailserver
+    E-mail: mymailbox@mydomain.com
+    E-mail password: mailboxpassword
 
 ## The steps
 
@@ -49,3 +57,450 @@ So, let's do it! :-)
 
 ### 1. Basic configuration using Postfix, Dovecot, MariaDB and certbot.
 
+Install required packages
+
+    sudo apt-get install mariadb-server postfix postfix-mysql dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-mysql mysql-server
+
+You will not be prompted to enter a password for the root MySQL user for recent versions of MySQL. This is because on Debian and Ubuntu, MySQL now uses either the `unix_socket` or `auth_socket` authorization plugin by default. This authorization scheme allows you to log in to the database’s root user as long as you are connecting from the Linux root user on localhost.
+
+When prompted, select Internet Site as the type of mail server the Postfix installer should configure. The System Mail Name should be the FQDN, in this case `mail.mydomain.com`.
+
+#### Set up and populate the database
+
+Create database, user and se privileges:
+
+    CREATE DATABASE mailserver;
+
+    GRANT SELECT ON mailserver.* TO 'mailuser'@'127.0.0.1' IDENTIFIED BY 'mailuserpass';
+    FLUSH PRIVILEGES;
+
+Create table for domains that will be server by our server:
+
+    CREATE TABLE `maildomains` (
+    `id` mediumint(5) NOT NULL auto_increment,
+    `name` varchar(64) NOT NULL,
+    PRIMARY KEY (`id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+Create table that will contain list of all users / mailboxes:
+
+    CREATE TABLE `mailusers` (
+    `id` int(8) NOT NULL auto_increment,
+    `domain_id` mediumint(5) NOT NULL,
+    `password` varchar(106) NOT NULL,
+    `email` varchar(255) NOT NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `email` (`email`),
+    FOREIGN KEY (domain_id) REFERENCES maildomains(id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+Create table for e-mail aliases:
+
+    CREATE TABLE `mailaliases` (
+    `id` int(8) NOT NULL auto_increment,
+    `domain_id` mediumint(5) NOT NULL,
+    `source` varchar(255) NOT NULL,
+    `destination` varchar(255) NOT NULL,
+    PRIMARY KEY (`id`),
+    FOREIGN KEY (domain_id) REFERENCES maildomains(id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+Now let's add some data:
+
+    INSERT INTO `maildomains`
+    (`id` ,`name`)
+    VALUES
+    ('1', 'mydomain.com');
+
+    INSERT INTO `mailusers`
+    (`id`, `domain_id`, `password` , `email`)
+    VALUES
+    ('1', '1', ENCRYPT('mailboxpassword', CONCAT('$6$', SUBSTRING(SHA(RAND()), -16))), 'mymailbox@mydomain.com');
+
+    INSERT INTO `mailaliases`
+    (`id`, `domain_id`, `source`, `destination`)
+    VALUES
+    ('1', '1', '@mydomain.com', 'mymailbox@mydomain.com');
+
+#### Configure Postfix
+
+Postfix is a Mail Transfer Agent (MTA) that relays mail between the Linode and the internet. It is highly configurable, allowing for great flexibility. TIn this guide I maintain many of Posfix’s default configuration values, thus it's highly recommended to dig deeper into documentation and adjust the setting more specifically.
+
+Primary configuration file used by Postfix is `main.cf`. First we will make a backup of this file in case that we need to revert the whole configuration.
+
+    sudo cp /etc/postfix/main.cf /etc/postfix/main.cf.orig
+
+Now lets edit the `/etc/postfix/main.cf` so it will look like this:
+
+    # See /usr/share/postfix/main.cf.dist for a commented, more complete version
+
+    # Debian specific:  Specifying a file name will cause the first
+    # line of that file to be used as the name.  The Debian default
+    # is /etc/mailname.
+    #myorigin = /etc/mailname
+
+    smtpd_banner = $myhostname ESMTP $mail_name (Ubuntu)
+    biff = no
+
+    # appending .domain is the MUA's job.
+    append_dot_mydomain = no
+
+    # Uncomment the next line to generate "delayed mail" warnings
+    #delay_warning_time = 4h
+
+    readme_directory = no
+
+    # TLS parameters
+    smtpd_tls_cert_file=/etc/letsencrypt/live/mail.mydomain.com/fullchain.pem
+    smtpd_tls_key_file=/etc/letsencrypt/live/mail.mydomain.com/privkey.pem
+    smtpd_use_tls=yes
+    smtpd_tls_auth_only = yes
+    smtp_tls_security_level = may
+    smtpd_tls_security_level = may
+    smtpd_sasl_security_options = noanonymous, noplaintext
+    smtpd_sasl_tls_security_options = noanonymous
+
+    # Authentication
+    smtpd_sasl_type = dovecot
+    smtpd_sasl_path = private/auth
+    smtpd_sasl_auth_enable = yes
+
+    # See /usr/share/doc/postfix/TLS_README.gz in the postfix-doc package for
+    # information on enabling SSL in the smtp client.
+
+    # Restrictions
+    smtpd_helo_restrictions =
+            permit_mynetworks,
+            permit_sasl_authenticated,
+            reject_invalid_helo_hostname,
+            reject_non_fqdn_helo_hostname
+    smtpd_recipient_restrictions =
+            permit_mynetworks,
+            permit_sasl_authenticated,
+            reject_non_fqdn_recipient,
+            reject_unknown_recipient_domain,
+            reject_unlisted_recipient,
+            reject_unauth_destination
+    smtpd_sender_restrictions =
+            permit_mynetworks,
+            permit_sasl_authenticated,
+            reject_non_fqdn_sender,
+            reject_unknown_sender_domain
+    smtpd_relay_restrictions =
+            permit_mynetworks,
+            permit_sasl_authenticated,
+            defer_unauth_destination
+
+    # See /usr/share/doc/postfix/TLS_README.gz in the postfix-doc package for
+    # information on enabling SSL in the smtp client.
+
+    myhostname = mail.mydomain.com
+    alias_maps = hash:/etc/aliases
+    alias_database = hash:/etc/aliases
+    mydomain = mydomain.com
+    myorigin = $mydomain
+    mydestination = localhost
+    relayhost =
+    mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128
+    mailbox_size_limit = 0
+    recipient_delimiter = +
+    inet_interfaces = all
+    inet_protocols = all
+
+    # Handing off local delivery to Dovecot's LMTP, and telling it where to store mail
+    virtual_transport = lmtp:unix:private/dovecot-lmtp
+
+    # Virtual domains, users, and aliases
+    virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
+    virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
+    virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-alias-maps.cf,
+            mysql:/etc/postfix/mysql-virtual-email2email.cf
+
+    # Even more Restrictions and MTA params
+    disable_vrfy_command = yes
+    strict_rfc821_envelopes = yes
+    #smtpd_etrn_restrictions = reject
+    #smtpd_reject_unlisted_sender = yes
+    #smtpd_reject_unlisted_recipient = yes
+    smtpd_delay_reject = yes
+    smtpd_helo_required = yes
+    smtp_always_send_ehlo = yes
+    #smtpd_hard_error_limit = 1
+    smtpd_timeout = 30s
+    smtp_helo_timeout = 15s
+    smtp_rcpt_timeout = 15s
+    smtpd_recipient_limit = 40
+    minimal_backoff_time = 180s
+    maximal_backoff_time = 3h
+
+    # Reply Rejection Codes
+    invalid_hostname_reject_code = 550
+    non_fqdn_reject_code = 550
+    unknown_address_reject_code = 550
+    unknown_client_reject_code = 550
+    unknown_hostname_reject_code = 550
+    unverified_recipient_reject_code = 550
+    unverified_sender_reject_code = 550
+
+The `main.cf` file declares the location of `virtual_mailbox_domains`, `virtual_mailbox_maps`, and `virtual_alias_maps` files. These files contain the connection information for the MySQL lookup tables created in the MySQL section of this tutorial. Postfix will use this data to identify all domains, corresponding mailboxes, and valid users.
+
+Create the file for `/etc/postfix/mysql-virtual-mailbox-domains.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT 1 FROM maildomains WHERE name='%s'
+
+Create the file for `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT 1 FROM mailusers WHERE email='%s'
+
+Create the file for `/etc/postfix/mysql-virtual-alias-maps.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT destination FROM mailaliases WHERE source='%s'
+
+Create the file for `/etc/postfix/mysql-virtual-email2email.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT email FROM mailusers WHERE email='%s'
+
+#### Set up Postfix master
+
+Postfix’s master program starts and monitors all of Postfix’s processes. The configuration file `master.cf` lists all programs and information on how they should be started. Lets begin with creating a backup.
+
+    sudo cp /etc/postfix/master.cf /etc/postfix/master.cf.orig
+
+Now edit `/etc/postfix/master.cf` to contain the values in the excerpt example. The rest of the file can remain unchanged:
+
+    #
+    # Postfix master process configuration file.  For details on the format
+    # of the file, see the master(5) manual page (command: "man 5 master" or
+    # on-line: http://www.postfix.org/master.5.html).
+    #
+    # Do not forget to execute "postfix reload" after editing this file.
+    #
+    # ==========================================================================
+    # service type  private unpriv  chroot  wakeup  maxproc command + args
+    #               (yes)   (yes)   (yes)    (never) (100)
+    # ==========================================================================
+    smtp      inet  n       -       n       -       -       smtpd
+    #smtp      inet  n       -       -       -       1       postscreen
+    #smtpd     pass  -       -       -       -       -       smtpd
+    #dnsblog   unix  -       -       -       -       0       dnsblog
+    #tlsproxy  unix  -       -       -       -       0       tlsproxy
+    submission inet n       -       y      -       -       smtpd
+    -o syslog_name=postfix/submission
+    -o smtpd_tls_security_level=encrypt
+    -o smtpd_sasl_auth_enable=yes
+    -o smtpd_sasl_type=dovecot
+    -o smtpd_sasl_path=private/auth
+    -o smtpd_reject_unlisted_recipient=no
+    -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+    -o milter_macro_daemon_name=ORIGINATING
+    smtps     inet  n       -       -       -       -       smtpd
+    -o syslog_name=postfix/smtps
+    -o smtpd_tls_wrappermode=yes
+    -o smtpd_sasl_auth_enable=yes
+    -o smtpd_sasl_type=dovecot
+    -o smtpd_sasl_path=private/auth
+    -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+    -o milter_macro_daemon_name=ORIGINATING
+    ...
+
+Change the permissions of the `/etc/postfix` directory to restrict permissions to allow only its owner and the corresponding group:
+
+    sudo chmod -R o-rwx /etc/postfix
+
+#### Configure Dovecot
+
+Dovecot is the _Mail Delivery Agent_ (MDA) which is passed messages from Postfix and delivers them to a virtual mailbox. In this section, configure Dovecot to force users to use SSL when they connect so that their passwords are never sent to the server in plain text.
+
+First back up all of the configuration files so you can easily revert back to them if needed:
+
+    sudo cp /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.conf.orig
+    sudo cp /etc/dovecot/conf.d/10-mail.conf /etc/dovecot/conf.d/10-mail.conf.orig
+    sudo cp /etc/dovecot/conf.d/10-auth.conf /etc/dovecot/conf.d/10-auth.conf.orig
+    sudo cp /etc/dovecot/dovecot-sql.conf.ext /etc/dovecot/dovecot-sql.conf.ext.orig
+    sudo cp /etc/dovecot/conf.d/10-master.conf /etc/dovecot/conf.d/10-master.conf.orig
+    sudo cp /etc/dovecot/conf.d/10-ssl.conf /etc/dovecot/conf.d/10-ssl.conf.orig
+
+Edit the `/etc/dovecot/dovecot.conf` file. Add `protocols = imap pop3 lmtp` to the `# Enable installed protocols` section of the file:
+
+    ## Dovecot configuration file
+    ...
+    # Enable installed protocols
+    !include_try /usr/share/dovecot/protocols.d/*.protocol
+    protocols = imap pop3 lmtp
+    ...
+    postmaster_address=postmaster@mydomain.com
+
+Edit the `/etc/dovecot/conf.d/10-mail.conf` file. This file controls how Dovecot interacts with the server’s file system to store and retrieve messages:
+
+Modify the following variables within the configuration file:
+
+    ...
+    mail_location = maildir:/var/mail/vhosts/%d/%n/
+    ...
+    mail_privileged_group = vmail
+    ...
+
+Create the `/var/mail/vhosts/` directory and a subdirectory for your domain. This directory will serve as storage for mail sent to your domain.
+
+    sudo mkdir -p /var/mail/vhosts/mydomain.com
+
+Create the `vmail` group with ID `5000`. Add a new user `vmail` to the `vmail` group. This system user will read mail from the server. Also change the owner of the /var/mail/ folder and its contents to belong to vmail:
+
+    sudo groupadd -g 5000 vmail
+    sudo useradd -g vmail -u 5000 vmail -d /var/mail
+    sudo chown -R vmail:vmail /var/mail
+
+Edit the user authentication file, located in `/etc/dovecot/conf.d/10-auth.conf`. Uncomment the following variables and replace with the file excerpt’s example values:
+
+    ...
+    disable_plaintext_auth = yes
+    ...
+    auth_mechanisms = plain login
+    ...
+    !include auth-system.conf.ext
+    ...
+    !include auth-sql.conf.ext
+    ...
+
+Edit the `/etc/dovecot/conf.d/auth-sql.conf.ext` file with authentication and storage information. Ensure your file contains the following lines. Make sure the `passdb` section is uncommented, that the `userdb` section that uses the static driver is uncommented and update with the right argument, and comment out the userdb section that uses the `sql` driver:
+
+    ...
+    passdb {
+    driver = sql
+    args = /etc/dovecot/dovecot-sql.conf.ext
+    }
+    ...
+    #userdb {
+    #  driver = sql
+    #  args = /etc/dovecot/dovecot-sql.conf.ext
+    #}
+    ...
+    userdb {
+    driver = static
+    args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
+    }
+    ...
+
+Update the `/etc/dovecot/dovecot-sql.conf.ext` file with your MySQL connection information. Uncomment the following variables and replace the values with the excerpt example.
+
+    ...
+    driver = mysql
+    ...
+    connect = host=127.0.0.1 dbname=mailserver user=mailuser password=mailuserpass
+    ...
+    default_pass_scheme = SHA512-CRYPT
+    ...
+    password_query = SELECT email as user, password FROM virtual_users WHERE email='%u';
+    ...
+
+The `password_query` variable uses email addresses listed in the `mailusers` table as the username credential for an email account.
+
+To use an alias as the username:
+- Add the alias as the `source` and `destination` email address to the `mailaliases` table.
+- Change the `/etc/dovecot/dovecot-sql.conf.ext` file’s `password_query` value to `password_query = SELECT email as user, password FROM mailusers WHERE email=(SELECT destination FROM mailaliases WHERE source = '%u');`
+
+Change the owner and group of the `/etc/dovecot/` directory to `vmail` and `dovecot`:
+
+    sudo chown -R vmail:dovecot /etc/dovecot
+
+Change the permissions on the `/etc/dovecot/` directory to be recursively read, write, and execute for the owner of the directory:
+
+    sudo chmod -R o-rwx /etc/dovecot
+
+Edit the service settings file `/etc/dovecot/conf.d/10-master.conf`.
+Disable unencrypted IMAP and POP3 by setting the protocols’ `ports` to `0`. Uncomment the `port` and `ssl` variables:
+
+    ...
+    service imap-login {
+    inet_listener imap {
+        port = 0
+    }
+    inet_listener imaps {
+        port = 993
+        ssl = yes
+    }
+    ...
+    }
+    ...
+    service pop3-login {
+    inet_listener pop3 {
+        port = 0
+    }
+    inet_listener pop3s {
+        port = 995
+        ssl = yes
+    }
+    }
+    ...
+
+Find the `service lmtp` section of the file and use the configuration shown below:
+
+    ...
+    service lmtp {
+        unix_listener /var/spool/postfix/private/dovecot-lmtp {
+            mode = 0600
+            user = postfix
+            group = postfix
+        }
+    ...
+    }
+
+Locate `service auth` and configure it as shown below:
+
+    ...
+    service auth {
+    ...
+        unix_listener /var/spool/postfix/private/auth {
+            mode = 0660
+            user = postfix
+            group = postfix
+        }
+
+        unix_listener auth-userdb {
+            mode = 0600
+            user = vmail
+        }
+    ...
+        user = dovecot
+    }
+    ...
+
+In the `service auth-worker` section, uncomment the `user` line and set it to `vmail`:
+
+    ...
+    service auth-worker {
+    ...
+    user = vmail
+    }
+
+Edit `/etc/dovecot/conf.d/10-ssl.conf` file to require SSL and to add the location of your domain’s SSL certificate and key:
+
+    ...
+    # SSL/TLS support: yes, no, required. <doc/wiki/SSL.txt>
+    ssl = required
+    ...
+    ssl_cert = </etc/letsencrypt/live/mail.mydomain.com/fullchain.pem
+    ssl_key = </etc/letsencrypt/live/mail.mydomain.com/privkey.pem
+
+And restart all affected services:
+
+    sudo systemctl restart postfix
+    sudo systemctl restart dovecot
+
+You should now be able to send and receive e-mail using properly configured e-mail client. If somethign is not working, trace the problem using system logs.

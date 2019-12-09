@@ -48,7 +48,7 @@ It also assumes that you have a pre-configured domain with proper MX records poi
 
 To make this tutorial more understandable, i will divide it into following steps, where each of them depends on previous one.
 
-1. Basic configuration using Postfix, Dovecot, MariaDB and certbot.
+1. Basic configuration using Postfix, Dovecot, MariaDB and certbot
 2. Keywords blocklist
 3. Spam filtering using Rspamd
 4. Virus filtering using ClamAV
@@ -59,11 +59,21 @@ So, let's do it! :-)
 
 Install required packages
 
-    sudo apt-get install mariadb-server postfix postfix-mysql dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-mysql mysql-server
+    sudo apt-get install mariadb-server postfix postfix-mysql dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd dovecot-mysql certbot
 
-You will not be prompted to enter a password for the root MySQL user for recent versions of MySQL. This is because on Debian and Ubuntu, MySQL now uses either the `unix_socket` or `auth_socket` authorization plugin by default. This authorization scheme allows you to log in to the database’s root user as long as you are connecting from the Linux root user on localhost.
+You will not be prompted to enter a password for the root MariaDB user for recent versions of MariaDB. This is because on Debian and Ubuntu, MariaDB now uses either the `unix_socket` or `auth_socket` authorization plugin by default. This authorization scheme allows you to log in to the database’s root user as long as you are connecting from the Linux root user on localhost.
 
 When prompted, select Internet Site as the type of mail server the Postfix installer should configure. The System Mail Name should be the FQDN, in this case `mail.mydomain.com`.
+
+#### Install certbot and obtain a certificate
+
+Certbot installation is pretty easy, so obtaining a certificate should not be a big hurdle. First obtain a certificate for your domain. If you are nto running any webserver on your installation, choose `Spin up a temporary webserver` when prompted how would you like to authenticate with the ACME CA:
+
+    sudo certbot certonly -d mail.mydomain.com
+
+Next, try renewing the certificate. It is just the dry-run so nothing is actually renewed, but certbot will add a command to autorenew your certificates, which will handle the renewals itself later.
+
+    sudo certbot renew --dry-run
 
 #### Set up and populate the database
 
@@ -79,7 +89,10 @@ Create table for domains that will be server by our server:
     CREATE TABLE `maildomains` (
     `id` mediumint(5) NOT NULL auto_increment,
     `name` varchar(64) NOT NULL,
-    PRIMARY KEY (`id`)
+    `enabled` tinyint(1) unsigned NOT NULL DEFAULT '1',
+    PRIMARY KEY (`id`),
+    INDEX `name` (`name`),
+    INDEX `enabled` (`enabled`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
 Create table that will contain list of all users / mailboxes:
@@ -89,8 +102,11 @@ Create table that will contain list of all users / mailboxes:
     `domain_id` mediumint(5) NOT NULL,
     `password` varchar(106) NOT NULL,
     `email` varchar(255) NOT NULL,
+    `quota` bigint(20) unsigned NOT NULL DEFAULT '0',
+    `enabled` tinyint(1) unsigned NOT NULL DEFAULT '1',
     PRIMARY KEY (`id`),
     UNIQUE KEY `email` (`email`),
+    INDEX `enabled` (`enabled`),
     FOREIGN KEY (domain_id) REFERENCES maildomains(id) ON DELETE CASCADE ON UPDATE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
@@ -101,7 +117,10 @@ Create table for e-mail aliases:
     `domain_id` mediumint(5) NOT NULL,
     `source` varchar(255) NOT NULL,
     `destination` varchar(255) NOT NULL,
+    `enabled` tinyint(1) unsigned NOT NULL DEFAULT '1',
     PRIMARY KEY (`id`),
+    INDEX `source` (`source`),
+    INDEX `enabled` (`enabled`),
     FOREIGN KEY (domain_id) REFERENCES maildomains(id) ON DELETE CASCADE ON UPDATE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 
@@ -250,7 +269,7 @@ Create the file for `/etc/postfix/mysql-virtual-mailbox-domains.cf` with followi
     password = mailpassword
     hosts = 127.0.0.1
     dbname = mailserver
-    query = SELECT 1 FROM maildomains WHERE name='%s'
+    query = SELECT 1 FROM maildomains WHERE name='%s' AND enabled=1
 
 Create the file for `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following content:
 
@@ -258,7 +277,7 @@ Create the file for `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following 
     password = mailpassword
     hosts = 127.0.0.1
     dbname = mailserver
-    query = SELECT 1 FROM mailusers WHERE email='%s'
+    query = SELECT 1 FROM mailusers WHERE email='%s' AND enabled=1
 
 Create the file for `/etc/postfix/mysql-virtual-alias-maps.cf` with following content:
 
@@ -266,7 +285,7 @@ Create the file for `/etc/postfix/mysql-virtual-alias-maps.cf` with following co
     password = mailpassword
     hosts = 127.0.0.1
     dbname = mailserver
-    query = SELECT destination FROM mailaliases WHERE source='%s'
+    query = SELECT destination FROM mailaliases WHERE source='%s' AND enabled=1
 
 Create the file for `/etc/postfix/mysql-virtual-email2email.cf` with following content:
 
@@ -274,7 +293,7 @@ Create the file for `/etc/postfix/mysql-virtual-email2email.cf` with following c
     password = mailpassword
     hosts = 127.0.0.1
     dbname = mailserver
-    query = SELECT email FROM mailusers WHERE email='%s'
+    query = SELECT email FROM mailusers WHERE email='%s' AND enabled=1
 
 #### Set up Postfix master
 
@@ -356,9 +375,9 @@ Modify the following variables within the configuration file:
     mail_privileged_group = vmail
     ...
 
-Create the `/var/mail/vhosts/` directory and a subdirectory for your domain. This directory will serve as storage for mail sent to your domain.
+Create the `/var/mail/vhosts/` directory. This directory will serve as storage for mail sent to your domain.
 
-    sudo mkdir -p /var/mail/vhosts/mydomain.com
+    sudo mkdir -p /var/mail/vhosts
 
 Create the `vmail` group with ID `5000`. Add a new user `vmail` to the `vmail` group. This system user will read mail from the server. Also change the owner of the /var/mail/ folder and its contents to belong to vmail:
 
@@ -378,23 +397,23 @@ Edit the user authentication file, located in `/etc/dovecot/conf.d/10-auth.conf`
     !include auth-sql.conf.ext
     ...
 
-Edit the `/etc/dovecot/conf.d/auth-sql.conf.ext` file with authentication and storage information. Ensure your file contains the following lines. Make sure the `passdb` section is uncommented, that the `userdb` section that uses the static driver is uncommented and update with the right argument, and comment out the userdb section that uses the `sql` driver:
+Edit the `/etc/dovecot/conf.d/auth-sql.conf.ext` file with authentication and storage information. Ensure your file contains the following lines. Make sure the `passdb` section is uncommented, that the `userdb` section that uses the sql driver is uncommented and update with the right `args`, and comment out the userdb section that uses the `static` driver:
 
     ...
     passdb {
-    driver = sql
-    args = /etc/dovecot/dovecot-sql.conf.ext
+        driver = sql
+        args = /etc/dovecot/dovecot-sql.conf.ext
+    }
+    ...
+    userdb {
+        driver = sql
+        args = /etc/dovecot/dovecot-sql.conf.ext
     }
     ...
     #userdb {
-    #  driver = sql
-    #  args = /etc/dovecot/dovecot-sql.conf.ext
+    #    driver = static
+    #    args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
     #}
-    ...
-    userdb {
-    driver = static
-    args = uid=vmail gid=vmail home=/var/mail/vhosts/%d/%n
-    }
     ...
 
 Update the `/etc/dovecot/dovecot-sql.conf.ext` file with your MySQL connection information. Uncomment the following variables and replace the values with the excerpt example.
@@ -406,14 +425,14 @@ Update the `/etc/dovecot/dovecot-sql.conf.ext` file with your MySQL connection i
     ...
     default_pass_scheme = SHA512-CRYPT
     ...
-    password_query = SELECT email as user, password FROM virtual_users WHERE email='%u';
+    password_query = SELECT u.email AS user, u.password, CONCAT('*:bytes=', u.quota) AS userdb_quota_rule FROM mailusers u INNER JOIN maildomains d ON d.id=u.domain_id WHERE u.email='%u' AND u.enabled=1 AND d.enabled=1;
+    ...
+    user_query = SELECT CONCAT('/var/mail/vhosts/', SUBSTRING_INDEX(u.email, '@', -1), '/', SUBSTRING_INDEX(u.email, '@', 1)) as home, 'vmail' as uid, 'vmail' as gid, CONCAT('*:bytes=', u.quota) AS quota_rule FROM mailusers u INNER JOIN maildomains d ON d.id=u.domain_id WHERE u.email='%u' AND u.enabled=1 AND d.enabled=1;
     ...
 
-The `password_query` variable uses email addresses listed in the `mailusers` table as the username credential for an email account.
+The `password_query` variable uses data in the `mailusers` table as the username credential for an email account. The `user_query` variable uses data in the `mailusers` table for primary verification whether user exists in the first place.
 
-To use an alias as the username:
-- Add the alias as the `source` and `destination` email address to the `mailaliases` table.
-- Change the `/etc/dovecot/dovecot-sql.conf.ext` file’s `password_query` value to `password_query = SELECT email as user, password FROM mailusers WHERE email=(SELECT destination FROM mailaliases WHERE source = '%u');`
+You can easily enabled / disable users or whole domains by simply turning value in `enabled` column from 1 to 0. Both queries also uses `quota` as user quota in bytes, so you can easily edit quotas by simply changing this entry.
 
 Change the owner and group of the `/etc/dovecot/` directory to `vmail` and `dovecot`:
 
@@ -428,24 +447,24 @@ Disable unencrypted IMAP and POP3 by setting the protocols’ `ports` to `0`. Un
 
     ...
     service imap-login {
-    inet_listener imap {
-        port = 0
-    }
-    inet_listener imaps {
-        port = 993
-        ssl = yes
-    }
+        inet_listener imap {
+            port = 0
+        }
+        inet_listener imaps {
+            port = 993
+            ssl = yes
+        }
     ...
     }
     ...
     service pop3-login {
-    inet_listener pop3 {
-        port = 0
-    }
-    inet_listener pop3s {
-        port = 995
-        ssl = yes
-    }
+        inet_listener pop3 {
+            port = 0
+        }
+        inet_listener pop3s {
+            port = 995
+            ssl = yes
+        }
     }
     ...
 
@@ -486,7 +505,7 @@ In the `service auth-worker` section, uncomment the `user` line and set it to `v
     ...
     service auth-worker {
     ...
-    user = vmail
+        user = vmail
     }
 
 Edit `/etc/dovecot/conf.d/10-ssl.conf` file to require SSL and to add the location of your domain’s SSL certificate and key:
@@ -503,4 +522,4 @@ And restart all affected services:
     sudo systemctl restart postfix
     sudo systemctl restart dovecot
 
-You should now be able to send and receive e-mail using properly configured e-mail client. If somethign is not working, trace the problem using system logs.
+You should now be able to send and receive e-mail using properly configured e-mail client. If something is not working, trace the problem using system logs (mainly `/var/log/syslog`).

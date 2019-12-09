@@ -263,7 +263,7 @@ Now lets edit the `/etc/postfix/main.cf` so it will look like this:
 
 The `main.cf` file declares the location of `virtual_mailbox_domains`, `virtual_mailbox_maps`, and `virtual_alias_maps` files. These files contain the connection information for the MySQL lookup tables created in the MySQL section of this tutorial. Postfix will use this data to identify all domains, corresponding mailboxes, and valid users.
 
-Create the file for `/etc/postfix/mysql-virtual-mailbox-domains.cf` with following content:
+Create the file `/etc/postfix/mysql-virtual-mailbox-domains.cf` with following content:
 
     user = mailuser
     password = mailpassword
@@ -271,7 +271,7 @@ Create the file for `/etc/postfix/mysql-virtual-mailbox-domains.cf` with followi
     dbname = mailserver
     query = SELECT 1 FROM maildomains WHERE name='%s' AND enabled=1
 
-Create the file for `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following content:
+Create the file `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following content:
 
     user = mailuser
     password = mailpassword
@@ -279,7 +279,7 @@ Create the file for `/etc/postfix/mysql-virtual-mailbox-maps.cf` with following 
     dbname = mailserver
     query = SELECT 1 FROM mailusers WHERE email='%s' AND enabled=1
 
-Create the file for `/etc/postfix/mysql-virtual-alias-maps.cf` with following content:
+Create the file `/etc/postfix/mysql-virtual-alias-maps.cf` with following content:
 
     user = mailuser
     password = mailpassword
@@ -287,7 +287,7 @@ Create the file for `/etc/postfix/mysql-virtual-alias-maps.cf` with following co
     dbname = mailserver
     query = SELECT destination FROM mailaliases WHERE source='%s' AND enabled=1
 
-Create the file for `/etc/postfix/mysql-virtual-email2email.cf` with following content:
+Create the file `/etc/postfix/mysql-virtual-email2email.cf` with following content:
 
     user = mailuser
     password = mailpassword
@@ -338,7 +338,7 @@ Now edit `/etc/postfix/master.cf` to contain the values in the excerpt example. 
     -o milter_macro_daemon_name=ORIGINATING
     ...
 
-Change the permissions of the `/etc/postfix` directory to restrict permissions to allow only its owner and the corresponding group:
+Restrict the permissions of the `/etc/postfix` directory to allow only its owner and the corresponding group:
 
     sudo chmod -R o-rwx /etc/postfix
 

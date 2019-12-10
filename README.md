@@ -81,7 +81,7 @@ Create database, user and se privileges:
 
     CREATE DATABASE mailserver;
 
-    GRANT SELECT ON mailserver.* TO 'mailuser'@'127.0.0.1' IDENTIFIED BY 'mailuserpass';
+    GRANT SELECT, EXECUTE ON mailserver.* TO 'mailuser'@'127.0.0.1' IDENTIFIED BY 'mailuserpass';
     FLUSH PRIVILEGES;
 
 Create table for domains that will be server by our server:

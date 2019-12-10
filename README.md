@@ -48,14 +48,14 @@ It also assumes that you have a pre-configured domain with proper MX records poi
 
 To make this tutorial more understandable, i will divide it into following steps, where each of them depends on previous one.
 
-1. Basic configuration using Postfix, Dovecot, MariaDB and certbot
-2. Keywords blocklist
+1. [Basic configuration using Postfix, Dovecot, MariaDB and certbot](#1-basic-configuration-using-postfix-dovecot-mariadb-and-certbot)
+2. [Keywords blacklist](#2-keywords-blacklist)
 3. Spam filtering using Rspamd
 4. Virus filtering using ClamAV
 
 So, let's do it! :-)
 
-### 1. Basic configuration using Postfix, Dovecot, MariaDB and certbot.
+### 1. Basic configuration using Postfix, Dovecot, MariaDB and certbot
 
 Install required packages
 
@@ -81,7 +81,7 @@ Create database, user and se privileges:
 
     CREATE DATABASE mailserver;
 
-    GRANT SELECT ON mailserver.* TO 'mailuser'@'127.0.0.1' IDENTIFIED BY 'mailuserpass';
+    GRANT SELECT, EXECUTE ON mailserver.* TO 'mailuser'@'127.0.0.1' IDENTIFIED BY 'mailuserpass';
     FLUSH PRIVILEGES;
 
 Create table for domains that will be server by our server:
@@ -158,7 +158,7 @@ Now lets edit the `/etc/postfix/main.cf` so it will look like this:
     # is /etc/mailname.
     #myorigin = /etc/mailname
 
-    smtpd_banner = $myhostname ESMTP $mail_name (Ubuntu)
+    smtpd_banner = $myhostname ESMTP $mail_name ($mail_version)
     biff = no
 
     # appending .domain is the MUA's job.
@@ -523,3 +523,87 @@ And restart all affected services:
     sudo systemctl restart dovecot
 
 You should now be able to send and receive e-mail using properly configured e-mail client. If something is not working, trace the problem using system logs (mainly `/var/log/syslog`).
+
+### 2. Keywords blacklist
+
+Create table for keywords blacklist:
+
+    CREATE TABLE `mailblacklistedkeywords` (
+    `id` smallint(5) unsigned NOT NULL AUTO_INCREMENT,
+    `type` char(1) DEFAULT NULL,
+    `pattern` varchar(255) DEFAULT NULL,
+    `action` varchar(255) DEFAULT NULL,
+    `description` varchar(255) DEFAULT NULL,
+    `active` tinyint(1) unsigned NOT NULL DEFAULT '1',
+    `amount_used` bigint(20) unsigned NOT NULL DEFAULT '0',
+    `last_used` datetime DEFAULT NULL,
+    PRIMARY KEY (`id`),
+    KEY `type` (`type`),
+    KEY `pattern` (`pattern`),
+    KEY `action` (`action`),
+    KEY `active` (`active`),
+    KEY `amount_used` (`amount_used`),
+    KEY `last_used` (`last_used`)
+    ) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+
+The columns in this table have following purpose:
+
+- `type` determines whether specieid phrase should be searched in e-mail header (`h`) or e-mail body (`b`)
+- `patter` is the blacklisted phrase - you can user regular expressions here
+- `action` specifies what Postfix should do in case the phrase is matched
+- `active` allows to simply enable / disable blacklist entries
+
+Populate table with test data:
+
+    INSERT INTO `mailblacklistedkeywords`
+    (`type`, `pattern`, `action`, `description`)
+    VALUES
+    ('b', 'blacklistedkeywordinbody', 'REJECT You are not welcome here', 'this is just a test keyword');
+
+Now create function that will return filter action based on given keyword. This function also updates use amount of found filter and last used datetime at the same time.
+
+    DELIMITER ;;
+    CREATE FUNCTION `blacklisted_keyword_verify`(`filter_type` char(1), `filter_pattern` text) RETURNS varchar(255) CHARSET utf8
+        DETERMINISTIC
+    BEGIN
+        DECLARE filter_id SMALLINT(5) DEFAULT 0;
+        DECLARE filter_action VARCHAR(255) DEFAULT NULL;
+
+        SELECT id, action INTO filter_id, filter_action FROM mailblacklistedkeywords WHERE type = filter_type AND active = 1 AND filter_pattern REGEXP pattern LIMIT 1;
+
+        UPDATE mailblacklistedkeywords SET amount_used = amount_used + 1, last_used = NOW() WHERE id = filter_id;
+
+        RETURN filter_action;
+    END;;
+    DELIMITER ;
+
+Add following lines to `/etc/postfix/main.cf`:
+
+    header_checks = mysql:/etc/postfix/mysql-virtual-header-checks.cf
+    body_checks = mysql:/etc/postfix/mysql-virtual-body-checks.cf
+
+Create the file `/etc/postfix/mysql-virtual-header-checks.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT blacklisted_keyword_verify('h', '%s')
+
+Create the file `/etc/postfix/mysql-virtual-body-checks.cf` with following content:
+
+    user = mailuser
+    password = mailpassword
+    hosts = 127.0.0.1
+    dbname = mailserver
+    query = SELECT blacklisted_keyword_verify('b', '%s')
+
+Restrict the permissions of the `/etc/postfix` directory to allow only its owner and the corresponding group:
+
+    sudo chmod -R o-rwx /etc/postfix
+
+And restart Postfix:
+
+    sudo systemctl restart postfix
+
+Now, if you send e-mail with phrase `blacklistedkeywordinbody` in body to your server, or try to send such e-mail from this server, you should get error response.

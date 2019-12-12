@@ -6,7 +6,7 @@ I'm not trying to create a bulletproof server, nor am I trying to create a solut
 
 All packages used in this tutorial are available in Debian repository, there is no need to install any extras, unless you want, of course.
 
-If you have any suggestions, feel free to let me know :-)
+If you have any suggestions, feel free to let me know, or better - fork master branch, make changes and create a pull request :-)
 
 ## What are we trying to achieve
 
@@ -15,10 +15,10 @@ Our small mailserver will be able to:
 - communicate using ***IMAP/SMTP/LMTP*** protocols
 - accept only secure connections, ***unencrypted connections will not be supported***
 - authenticate users with ***e-mail*** as username and ***password***
-- read frequently configuration (domains, users, passwords, quotas, blacklisted phrases) from database
+- read frequently changed configuration (domains, users, passwords, quotas, blacklisted phrases) from database, so we can make quick changes
+- limit rates for sending e-mails, ask some RBLs if e-mail should be blocked
 - filter spam
 - filter viruses
-- limit rates for sending e-mails
 
 ## Prerequisities
 
@@ -49,9 +49,10 @@ It also assumes that you have a pre-configured domain with proper MX records poi
 To make this tutorial more understandable, i will divide it into following steps, where each of them depends on previous one.
 
 1. [Basic configuration using Postfix, Dovecot, MariaDB and certbot](#1-basic-configuration-using-postfix-dovecot-mariadb-and-certbot)
-2. [Keywords blacklist](#2-keywords-blacklist)
-3. Spam filtering using Rspamd
-4. Virus filtering using ClamAV
+2. [RBL checks](#2-rbl-checks)
+3. [Keywords blacklist](#3-keywords-blacklist)
+4. Spam filtering using Rspamd
+5. Virus filtering using ClamAV
 
 So, let's do it! :-)
 
@@ -199,7 +200,8 @@ Now lets edit the `/etc/postfix/main.cf` so it will look like this:
             reject_non_fqdn_recipient,
             reject_unknown_recipient_domain,
             reject_unlisted_recipient,
-            reject_unauth_destination
+            reject_unauth_destination,
+            reject_unauth_pipelining
     smtpd_sender_restrictions =
             permit_mynetworks,
             permit_sasl_authenticated,
@@ -385,6 +387,10 @@ Create the `vmail` group with ID `5000`. Add a new user `vmail` to the `vmail` g
     sudo useradd -g vmail -u 5000 vmail -d /var/mail
     sudo chown -R vmail:vmail /var/mail
 
+In case of our settings, the full path where our mail is stored is ***/var/mail/vhosts/mydomain.com/mymailbox***.
+
+All required subdirectories will be created automatically by Dovecot, which is a huge benefit. Still, there is one drawback - when you delete mailbox from database, the mailbox folder will not be deleted accordingly - you have to do it manually.
+
 Edit the user authentication file, located in `/etc/dovecot/conf.d/10-auth.conf`. Uncomment the following variables and replace with the file excerpt’s example values:
 
     ...
@@ -524,7 +530,31 @@ And restart all affected services:
 
 You should now be able to send and receive e-mail using properly configured e-mail client. If something is not working, trace the problem using system logs (mainly `/var/log/syslog`).
 
-### 2. Keywords blacklist
+### 2. RBL checks
+
+Nowadays, there are plenty of RBLs, but only few of them is trustworthy and stable enough so we can rely on them. We will connect to some of those lists to check whether e-mail should be processed or rejected.
+
+First modify section `smtpd_recipient_restrictions` in your Postfix `main.cf` so it will look like this:
+
+    smtpd_recipient_restrictions =
+        permit_mynetworks,
+        permit_sasl_authenticated,
+        reject_non_fqdn_recipient,
+        reject_unknown_recipient_domain,
+        reject_unlisted_recipient,
+        reject_unauth_destination,
+        reject_unauth_pipelining,
+        reject_rbl_client bl.spamcop.net,
+        reject_rbl_client b.barracudacentral.org,
+        reject_rbl_client dnsbl.sorbs.net
+
+Now just restart Postfix:
+
+    sudo systemctl restart postfix
+
+Whenever new e-mail arrives, you server will now ask three RBL if sernder of the e-mail is blacklisted.
+
+### 3. Keywords blacklist
 
 Create table for keywords blacklist:
 

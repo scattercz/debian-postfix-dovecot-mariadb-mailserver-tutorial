@@ -52,7 +52,7 @@ To make this tutorial more understandable, i will divide it into following steps
 2. [RBL checks](#2-rbl-checks)
 3. [Keywords blacklist](#3-keywords-blacklist)
 4. [Spam filtering using Rspamd](#4-spam-filtering-using-rspamd)
-5. Virus filtering using ClamAV
+5. [Virus filtering using ClamAV](#5-virus-scanning-using-clamav-and-rspamd)
 
 So, let's do it! :-)
 
@@ -659,8 +659,45 @@ Now edit `/etc/postfix/main.cf` and add following lines:
     milter_default_action = accept
     milter_protocol = 6
 
-And restart Postfix:
+We also want to know that our mail was processed by rspamd - just to be sure. So we will force rspamd to add header to each processed e-mail.
 
+Create file `/etc/rspamd/local.d/milter_headers.conf` and add following content:
+
+    extended_spam_headers = true;
+
+Finally just restart Rspamd and Postfix:
+
+    sudo systemctl restart rspamd
     sudo systemctl restart postfix
 
 Now we have basic spam filter installed and running :-)
+
+To verify that everything works fine, just display headers of incoming e-mails - you should se some rspamd details within them.
+
+### 5. Virus scanning using ClamAV and Rspamd
+
+As mentioned before, rspamd's basic functionality can be extended with some very interesting modules. We will start with virus scanning module that will use ClamAV - the open source antivirus engine for Linux.
+
+First install ClamAV and freshclam, which will take care about automatic updates of the virus database.
+
+    sudo apt-get install clamav clamav-daemon clamav-freshclam
+
+Now create file `/etc/rspamd/local.d/antivirus.conf` with following content:
+
+    clamav {
+        action = "reject";
+        message = '${SCANNER} found virus: "${VIRUS}"';
+        scan_mime_parts = true;
+        symbol = "CLAM_VIRUS";
+        type = "clamav";
+        servers = "/var/run/clamav/clamd.ctl";
+        patterns {
+            JUST_EICAR = '^Eicar-Test-Signature$';
+        }
+    }
+
+And restart Rspamd:
+
+    sudo systemctl restart rspamd
+
+All e-mails containing viruses should now be automatically rejected.
